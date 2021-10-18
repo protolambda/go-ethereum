@@ -130,10 +130,12 @@ type blockExecutionEnv struct {
 	receipts []*types.Receipt
 }
 
-func (env *blockExecutionEnv) commitTransaction(tx *types.Transaction, coinbase common.Address) error {
+func (env *blockExecutionEnv) commitTransaction(trustedDeposit bool, tx *types.Transaction, coinbase common.Address) error {
 	vmconfig := *env.chain.GetVMConfig()
 	snap := env.state.Snapshot()
-	receipt, err := core.ApplyTransaction(env.chain.Config(), env.chain, &coinbase, env.gasPool, env.state, env.header, tx, &env.header.GasUsed, vmconfig)
+	chConfig := *env.chain.Config()
+	chConfig.TrustedDeposits = trustedDeposit
+	receipt, err := core.ApplyTransaction(&chConfig, env.chain, &coinbase, env.gasPool, env.state, env.header, tx, &env.header.GasUsed, vmconfig)
 	if err != nil {
 		env.state.RevertToSnapshot(snap)
 		return err
@@ -252,7 +254,7 @@ func (api *ConsensusAPI) ExecutePayload(params ExecutableData) (GenericStringRes
 	if td.Cmp(ttd) < 0 {
 		return INVALID, fmt.Errorf("can not execute payload on top of block with low td got: %v threshold %v", td, ttd)
 	}
-	if err := api.eth.BlockChain().InsertBlock(block); err != nil {
+	if err := api.eth.BlockChain().InsertBlockWithTrustedDeposits(block); err != nil {
 		return INVALID, err
 	}
 	return VALID, nil
@@ -310,22 +312,48 @@ func (api *ConsensusAPI) assembleBlock(params AssembleBlockParams) (*ExecutableD
 		txHeap       = types.NewTransactionsByPriceAndNonce(signer, pending, nil)
 		transactions []*types.Transaction
 	)
+	forceTransactions := make([]*types.Transaction, 0, len(params.Transactions))
+	for i, otx := range params.Transactions {
+		var tx types.Transaction
+		if err := tx.UnmarshalBinary(otx); err != nil {
+			return nil, fmt.Errorf("transaction %d is not valid: %v", i, err)
+		}
+		forceTransactions = append(forceTransactions, &tx)
+	}
 	for {
 		if env.gasPool.Gas() < chainParams.TxGas {
 			log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", chainParams.TxGas)
 			break
 		}
-		tx := txHeap.Peek()
-		if tx == nil {
-			break
-		}
 
-		// The sender is only for logging purposes, and it doesn't really matter if it's correct.
-		from, _ := types.Sender(signer, tx)
+		var tx *types.Transaction
+		var from common.Address
+		trustedDeposit := false
+
+		if len(forceTransactions) == 0 {
+			// can we take other transactions?
+			if params.OnlyApiTransactions {
+				break
+			} else {
+				// try to take from memory pool if we processed all force-transactions
+				tx = txHeap.Peek()
+				if tx == nil {
+					break
+				}
+
+				// The sender is only for logging purposes, and it doesn't really matter if it's correct.
+				from, _ = types.Sender(signer, tx)
+			}
+		} else {
+			tx = forceTransactions[0]
+			forceTransactions = forceTransactions[1:]
+			from, _ = types.Sender(types.NewDepositSigner(bc.Config().ChainID), tx)
+			trustedDeposit = true
+		}
 
 		// Execute the transaction
 		env.state.Prepare(tx.Hash(), env.tcount)
-		err = env.commitTransaction(tx, coinbase)
+		err = env.commitTransaction(trustedDeposit, tx, coinbase)
 		switch err {
 		case core.ErrGasLimitReached:
 			// Pop the current out-of-gas transaction without shifting in the next from the account

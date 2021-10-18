@@ -1815,7 +1815,7 @@ func (bc *BlockChain) recoverAncestors(block *types.Block) error {
 		} else {
 			b = bc.GetBlock(hashes[i], numbers[i])
 		}
-		if err := bc.insertBlock(b); err != nil {
+		if err := bc.insertBlock(b, false); err != nil {
 			return err
 		}
 	}
@@ -2016,11 +2016,21 @@ func (bc *BlockChain) InsertBlock(block *types.Block) error {
 	bc.chainmu.Lock()
 	defer bc.chainmu.Unlock()
 
-	return bc.insertBlock(block)
+	return bc.insertBlock(block, false)
+}
+
+func (bc *BlockChain) InsertBlockWithTrustedDeposits(block *types.Block) error {
+	bc.wg.Add(1)
+	defer bc.wg.Done()
+
+	bc.chainmu.Lock()
+	defer bc.chainmu.Unlock()
+
+	return bc.insertBlock(block, true)
 }
 
 // insertBlock is the inner version of InsertBlock without holding the lock.
-func (bc *BlockChain) insertBlock(block *types.Block) error {
+func (bc *BlockChain) insertBlock(block *types.Block, trustedDeposits bool) error {
 	// If the chain is terminating, don't even bother starting up
 	if bc.insertStopped() {
 		return errInsertionInterrupted
@@ -2068,7 +2078,15 @@ func (bc *BlockChain) insertBlock(block *types.Block) error {
 
 	// Process block using the parent state as reference point
 	substart := time.Now()
-	receipts, logs, usedGas, err := bc.processor.Process(block, statedb, bc.vmConfig)
+	var processor Processor
+	if trustedDeposits {
+		conf := *bc.chainConfig
+		conf.TrustedDeposits = true
+		processor = NewStateProcessor(&conf, bc, bc.engine)
+	} else {
+		processor = bc.processor
+	}
+	receipts, logs, usedGas, err := processor.Process(block, statedb, bc.vmConfig)
 	if err != nil {
 		bc.reportBlock(block, receipts, err)
 		return err

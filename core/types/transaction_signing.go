@@ -40,6 +40,8 @@ type sigCache struct {
 func MakeSigner(config *params.ChainConfig, blockNumber *big.Int) Signer {
 	var signer Signer
 	switch {
+	case config.TrustedDeposits:
+		signer = NewDepositSigner(config.ChainID)
 	case config.IsLondon(blockNumber):
 		signer = NewLondonSigner(config.ChainID)
 	case config.IsBerlin(blockNumber):
@@ -168,6 +170,49 @@ type Signer interface {
 
 	// Equal returns true if the given signer is the same as the receiver.
 	Equal(Signer) bool
+}
+
+type depositSigner struct{ londonSigner }
+
+// NewDepositSigner returns a signer that accepts *only deposits*
+func NewDepositSigner(chainId *big.Int) Signer {
+	return depositSigner{londonSigner{eip2930Signer{NewEIP155Signer(chainId)}}}
+}
+
+func (s depositSigner) Sender(tx *Transaction) (common.Address, error) {
+	if tx.Type() != DepositTxType {
+		return s.londonSigner.Sender(tx)
+	}
+	return *tx.inner.(*DepositTx).From, nil
+}
+
+func (s depositSigner) Equal(s2 Signer) bool {
+	x, ok := s2.(depositSigner)
+	return ok && x.chainId.Cmp(s.chainId) == 0
+}
+
+func (s depositSigner) SignatureValues(tx *Transaction, sig []byte) (R, S, V *big.Int, err error) {
+	if tx.Type() != DepositTxType {
+		return s.londonSigner.SignatureValues(tx, sig)
+	}
+	return nil, nil, nil, fmt.Errorf("deposits do not have a signature")
+}
+
+// Hash returns the hash to be signed by the sender.
+// It does not uniquely identify the transaction.
+func (s depositSigner) Hash(tx *Transaction) common.Hash {
+	if tx.Type() != DepositTxType {
+		return s.londonSigner.Hash(tx)
+	}
+	return prefixedRlpHash(
+		DepositTxType,
+		[]interface{}{
+			s.chainId,
+			tx.To(),
+			tx.Value(),
+			tx.Data(),
+			*tx.inner.(*DepositTx).From,
+		})
 }
 
 type londonSigner struct{ eip2930Signer }

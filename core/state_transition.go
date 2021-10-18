@@ -270,6 +270,41 @@ func (st *StateTransition) preCheck() error {
 // However if any consensus issue encountered, return the error directly with
 // nil evm execution result.
 func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
+	msg := st.msg
+	sender := vm.AccountRef(msg.From())
+	contractCreation := msg.To() == nil
+
+	// hack to detect we converted a deposit tx to a msg
+	if msg.Nonce() == 0xffff_ffff_ffff_ffff {
+		if !st.evm.ChainConfig().TrustedDeposits {
+			return nil, fmt.Errorf("cannot accept deposit, message is not authenticated")
+		}
+		var (
+			ret   []byte
+			vmerr error // vm errors do not effect consensus and are therefore not assigned to err
+		)
+
+		// The deposit mints value into the account before execution
+		st.state.AddBalance(st.msg.From(), st.value)
+
+		if contractCreation {
+			ret, _, st.gas, vmerr = st.evm.Create(sender, st.data, st.gas, st.value)
+		} else {
+			// Increment the nonce for the next transaction
+			st.state.SetNonce(msg.From(), st.state.GetNonce(sender.Address())+1)
+			ret, st.gas, vmerr = st.evm.Call(sender, st.to(), st.data, st.gas, st.value)
+		}
+
+		// all the gas that has been consumed can be returned, deposits don't permanently consume gas from a block
+		st.gp.AddGas(st.initialGas)
+
+		return &ExecutionResult{
+			UsedGas:    0, // 0 gas used (TODO: maybe use the real value, it's used in receipt, but not for block accounting)
+			Err:        vmerr,
+			ReturnData: ret,
+		}, nil
+	}
+
 	// First check this message satisfies all consensus rules before
 	// applying the message. The rules include these clauses
 	//
@@ -284,12 +319,9 @@ func (st *StateTransition) TransitionDb() (*ExecutionResult, error) {
 	if err := st.preCheck(); err != nil {
 		return nil, err
 	}
-	msg := st.msg
-	sender := vm.AccountRef(msg.From())
 	homestead := st.evm.ChainConfig().IsHomestead(st.evm.Context.BlockNumber)
 	istanbul := st.evm.ChainConfig().IsIstanbul(st.evm.Context.BlockNumber)
 	london := st.evm.ChainConfig().IsLondon(st.evm.Context.BlockNumber)
-	contractCreation := msg.To() == nil
 
 	// Check clauses 4-5, subtract intrinsic gas if everything is correct
 	gas, err := IntrinsicGas(st.data, st.msg.AccessList(), contractCreation, homestead, istanbul)

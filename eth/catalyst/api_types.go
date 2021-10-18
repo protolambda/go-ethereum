@@ -31,6 +31,9 @@ type AssembleBlockParams struct {
 	Timestamp    uint64         `json:"timestamp"     gencodec:"required"`
 	Random       common.Hash    `json:"random"        gencodec:"required"`
 	FeeRecipient common.Address `json:"feeRecipient"  gencodec:"required"`
+	// new for rollups
+	Transactions        [][]byte `json:"transactions,omitempty"  gencodec:"optional"`
+	OnlyApiTransactions bool     `json:"onlyApiTransactions" gencodec:"optional"`
 }
 
 // JSON type overrides for assembleBlockParams.
