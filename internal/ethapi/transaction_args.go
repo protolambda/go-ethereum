@@ -23,6 +23,8 @@ import (
 	"fmt"
 	"math/big"
 
+	"github.com/protolambda/ztyp/view"
+
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
@@ -52,6 +54,8 @@ type TransactionArgs struct {
 	// Introduced by AccessListTxType transaction.
 	AccessList *types.AccessList `json:"accessList,omitempty"`
 	ChainID    *hexutil.Big      `json:"chainId,omitempty"`
+
+	Blobs []types.Blob `json:"blobs,omitempty"`
 }
 
 // from retrieves the transaction sender address.
@@ -247,7 +251,33 @@ func (args *TransactionArgs) ToMessage(globalGasCap uint64, baseFee *big.Int) (t
 // This assumes that setDefaults has been called.
 func (args *TransactionArgs) toTransaction() *types.Transaction {
 	var data types.TxData
+	var opts []types.TxOption
 	switch {
+	case args.Blobs != nil:
+		al := types.AccessList{}
+		if args.AccessList != nil {
+			al = *args.AccessList
+		}
+		msg := types.BlobTxMessage{}
+		msg.To.Address = (*types.AddressSSZ)(args.To)
+		msg.ChainID.SetFromBig((*big.Int)(args.ChainID))
+		msg.Nonce = view.Uint64View(*args.Nonce)
+		msg.Gas = view.Uint64View(*args.Gas)
+		msg.GasFeeCap.SetFromBig((*big.Int)(args.MaxFeePerGas))
+		msg.GasTipCap.SetFromBig((*big.Int)(args.MaxPriorityFeePerGas))
+		msg.Value.SetFromBig((*big.Int)(args.Value))
+		msg.Data = args.data()
+		msg.AccessList = types.AccessListView(al)
+		commitments, versionedHashes, ok := types.Blobs(args.Blobs).ComputeCommitments()
+		// XXX if blobs are invalid we will omit the wrap-data (and an error will pop-up later)
+		if ok {
+			opts = append(opts, types.WithTxWrapData(&types.BlobTxWrapData{
+				BlobKzgs: commitments,
+				Blobs:    args.Blobs,
+			}))
+			msg.BlobVersionedHashes = versionedHashes
+		}
+		data = &types.SignedBlobTx{Message: msg}
 	case args.MaxFeePerGas != nil:
 		al := types.AccessList{}
 		if args.AccessList != nil {
@@ -285,7 +315,7 @@ func (args *TransactionArgs) toTransaction() *types.Transaction {
 			Data:     args.data(),
 		}
 	}
-	return types.NewTx(data)
+	return types.NewTx(data, opts...)
 }
 
 // ToTransaction converts the arguments to a transaction.

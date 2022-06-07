@@ -97,12 +97,13 @@ func (api *ConsensusAPI) ForkchoiceUpdatedV1(heads beacon.ForkchoiceStateV1, pay
 	}
 	// Assemble block (if needed). It only works for full node.
 	if payloadAttributes != nil {
-		data, err := api.assembleBlock(heads.HeadBlockHash, payloadAttributes)
+		execData, blobsBundle, err := api.assembleBlock(heads.HeadBlockHash, payloadAttributes)
 		if err != nil {
 			return beacon.INVALID, err
 		}
 		id := computePayloadId(heads.HeadBlockHash, payloadAttributes)
-		api.preparedBlocks.put(id, data)
+		api.preparedBlocks.put(id, execData, blobsBundle)
+
 		log.Info("Created payload", "payloadID", id)
 		return beacon.ForkChoiceResponse{Status: beacon.SUCCESS.Status, PayloadID: &id}, nil
 	}
@@ -112,11 +113,21 @@ func (api *ConsensusAPI) ForkchoiceUpdatedV1(heads beacon.ForkchoiceStateV1, pay
 // GetPayloadV1 returns a cached payload by id.
 func (api *ConsensusAPI) GetPayloadV1(payloadID beacon.PayloadID) (*beacon.ExecutableDataV1, error) {
 	log.Trace("Engine API request received", "method", "GetPayload", "id", payloadID)
-	data := api.preparedBlocks.get(payloadID)
+	data, _ := api.preparedBlocks.get(payloadID)
 	if data == nil {
 		return nil, &beacon.UnknownPayload
 	}
 	return data, nil
+}
+
+// GetBlobsBundleV1 returns a bundle of all blob and corresponding KZG commitments by payload id
+func (api *ConsensusAPI) GetBlobsBundleV1(payloadID beacon.PayloadID) (*beacon.BlobsBundleV1, error) {
+	log.Trace("Engine API request received", "method", "GetBlobsBundle")
+	_, blobsBundle := api.preparedBlocks.get(payloadID)
+	if blobsBundle == nil {
+		return nil, &beacon.UnknownPayload
+	}
+	return blobsBundle, nil
 }
 
 // ExecutePayloadV1 creates an Eth1 block, inserts it in the chain, and returns the status of the chain.
@@ -173,13 +184,17 @@ func (api *ConsensusAPI) invalid() beacon.ExecutePayloadResponse {
 
 // assembleBlock creates a new block and returns the "execution
 // data" required for beacon clients to process the new block.
-func (api *ConsensusAPI) assembleBlock(parentHash common.Hash, params *beacon.PayloadAttributesV1) (*beacon.ExecutableDataV1, error) {
+func (api *ConsensusAPI) assembleBlock(parentHash common.Hash, params *beacon.PayloadAttributesV1) (*beacon.ExecutableDataV1, *beacon.BlobsBundleV1, error) {
 	log.Info("Producing block", "parentHash", parentHash)
 	block, err := api.eth.Miner().GetSealingBlock(parentHash, params.Timestamp, params.SuggestedFeeRecipient, params.Random)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return beacon.BlockToExecutableData(block), nil
+	execData, blobsBundle, err := beacon.BlockToWrappedExecutableData(block)
+	if err != nil {
+		return nil, nil, err
+	}
+	return execData, blobsBundle, nil
 }
 
 // Used in tests to add a the list of transactions from a block to the tx pool.
