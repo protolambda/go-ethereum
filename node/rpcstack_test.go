@@ -100,7 +100,7 @@ func TestWebsocketOrigins(t *testing.T) {
 			expFail: []string{
 				"test",                                // no scheme, required by spec
 				"http://test",                         // wrong scheme
-				"http://test.foo", "https://a.test.x", // subdomain variatoins
+				"http://test.foo", "https://a.test.x", // subdomain variations
 				"http://testx:8540", "https://xtest:8540"},
 		},
 		// ip tests
@@ -412,8 +412,10 @@ func TestJWT(t *testing.T) {
 		if err := wsRequest(t, wsUrl, "Authorization", token); err == nil {
 			t.Errorf("tc %d-ws, token '%v': expected not to allow,  got ok", i, token)
 		}
+
 		token = tokenFn()
-		if resp := rpcRequest(t, htUrl, "Authorization", token); resp.StatusCode != 403 {
+		resp := rpcRequest(t, htUrl, "Authorization", token)
+		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("tc %d-http, token '%v': expected not to allow,  got %v", i, token, resp.StatusCode)
 		}
 	}

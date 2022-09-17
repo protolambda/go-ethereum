@@ -608,7 +608,7 @@ func doDocker(cmdline []string) {
 			}
 			if mismatch {
 				// Build numbers mismatching, retry in a short time to
-				// avoid concurrent failes in both publisher images. If
+				// avoid concurrent fails in both publisher images. If
 				// however the retry failed too, it means the concurrent
 				// builder is still crunching, let that do the publish.
 				if i == 0 {
@@ -982,7 +982,10 @@ func doWindowsInstaller(cmdline []string) {
 	if env.Commit != "" {
 		version[2] += "-" + env.Commit[:8]
 	}
-	installer, _ := filepath.Abs("geth-" + archiveBasename(*arch, params.ArchiveVersion(env.Commit)) + ".exe")
+	installer, err := filepath.Abs("geth-" + archiveBasename(*arch, params.ArchiveVersion(env.Commit)) + ".exe")
+	if err != nil {
+		log.Fatalf("Failed to convert installer file path: %v", err)
+	}
 	build.MustRunCommand("makensis.exe",
 		"/DOUTPUTFILE="+installer,
 		"/DMAJORVERSION="+version[0],

@@ -62,10 +62,23 @@ const (
 	// have lead to some bad ancestor block. It's just an OOM protection.
 	invalidTipsetsCap = 512
 
-	// beaconUpdateTimeout is the max time allowed for a beacon client to signal
-	// use (from the last heartbeat) before it's consifered offline and the user
+	// beaconUpdateStartupTimeout is the time to wait for a beacon client to get
+	// attached before starting to issue warnings.
+	beaconUpdateStartupTimeout = 30 * time.Second
+
+	// beaconUpdateExchangeTimeout is the max time allowed for a beacon client to
+	// do a transition config exchange before it's considered offline and the user
 	// is warned.
-	beaconUpdateTimeout = 30 * time.Second
+	beaconUpdateExchangeTimeout = 2 * time.Minute
+
+	// beaconUpdateConsensusTimeout is the max time allowed for a beacon client
+	// to send a consensus update before it's considered offline and the user is
+	// warned.
+	beaconUpdateConsensusTimeout = 30 * time.Second
+
+	// beaconUpdateWarnFrequency is the frequency at which to warn the user that
+	// the beacon client is offline.
+	beaconUpdateWarnFrequency = 5 * time.Minute
 )
 
 type ConsensusAPI struct {
@@ -550,28 +563,28 @@ func (api *ConsensusAPI) invalid(err error, latestValid *types.Header) beacon.Pa
 	return beacon.PayloadStatusV1{Status: beacon.INVALID, LatestValidHash: &currentHash, ValidationError: &errorMsg}
 }
 
-// heatbeat loops indefinitely, and checks if there have been beacon client updates
+// heartbeat loops indefinitely, and checks if there have been beacon client updates
 // received in the last while. If not - or if they but strange ones - it warns the
 // user that something might be off with their consensus node.
 //
 // TODO(karalabe): Spin this goroutine down somehow
 func (api *ConsensusAPI) heartbeat() {
-	// Sleep a bit more on startup since there's obviously no beacon client yet
+	// Sleep a bit on startup since there's obviously no beacon client yet
 	// attached, so no need to print scary warnings to the user.
-	time.Sleep(beaconUpdateTimeout)
+	time.Sleep(beaconUpdateStartupTimeout)
 
 	var (
 		offlineLogged time.Time
+		ttd           = api.eth.BlockChain().Config().TerminalTotalDifficulty
 	)
+	// If the network is not yet merged/merging, don't bother continuing.
+	if ttd == nil {
+		return
+	}
 	for {
 		// Sleep a bit and retrieve the last known consensus updates
 		time.Sleep(5 * time.Second)
 
-		// If the network is not yet merged/merging, don't bother scaring the user
-		ttd := api.eth.BlockChain().Config().TerminalTotalDifficulty
-		if ttd == nil {
-			continue
-		}
 		api.lastTransitionLock.Lock()
 		lastTransitionUpdate := api.lastTransitionUpdate
 		api.lastTransitionLock.Unlock()
@@ -587,85 +600,86 @@ func (api *ConsensusAPI) heartbeat() {
 		// If there have been no updates for the past while, warn the user
 		// that the beacon client is probably offline
 		if api.eth.BlockChain().Config().TerminalTotalDifficultyPassed || api.eth.Merger().TDDReached() {
-			if time.Since(lastForkchoiceUpdate) > beaconUpdateTimeout && time.Since(lastNewPayloadUpdate) > beaconUpdateTimeout {
-				if time.Since(lastTransitionUpdate) > beaconUpdateTimeout {
-					if time.Since(offlineLogged) > beaconUpdateTimeout {
-						if lastTransitionUpdate.IsZero() {
-							log.Warn("Post-merge network, but no beacon client seen. Please launch one to follow the chain!")
-						} else {
-							log.Warn("Previously seen beacon client is offline. Please ensure it is operational to follow the chain!")
-						}
-						offlineLogged = time.Now()
-					}
-					continue
-				}
-				if time.Since(offlineLogged) > beaconUpdateTimeout {
-					if lastForkchoiceUpdate.IsZero() && lastNewPayloadUpdate.IsZero() {
-						log.Warn("Beacon client online, but never received consensus updates. Please ensure your beacon client is operational to follow the chain!")
+			if time.Since(lastForkchoiceUpdate) <= beaconUpdateConsensusTimeout || time.Since(lastNewPayloadUpdate) <= beaconUpdateConsensusTimeout {
+				offlineLogged = time.Time{}
+				continue
+			}
+			if time.Since(lastTransitionUpdate) > beaconUpdateExchangeTimeout {
+				if time.Since(offlineLogged) > beaconUpdateWarnFrequency {
+					if lastTransitionUpdate.IsZero() {
+						log.Warn("Post-merge network, but no beacon client seen. Please launch one to follow the chain!")
 					} else {
-						log.Warn("Beacon client online, but no consensus updates received in a while. Please fix your beacon client to follow the chain!")
+						log.Warn("Previously seen beacon client is offline. Please ensure it is operational to follow the chain!")
 					}
 					offlineLogged = time.Now()
 				}
 				continue
 			}
-		} else {
-			if time.Since(lastTransitionUpdate) > beaconUpdateTimeout {
-				if time.Since(offlineLogged) > beaconUpdateTimeout {
-					// Retrieve the last few blocks and make a rough estimate as
-					// to when the merge transition should happen
-					var (
-						chain = api.eth.BlockChain()
-						head  = chain.CurrentBlock()
-						htd   = chain.GetTd(head.Hash(), head.NumberU64())
-						eta   time.Duration
-					)
-					if head.NumberU64() > 0 && htd.Cmp(ttd) < 0 {
-						// Accumulate the last 64 difficulties to estimate the growth
-						var diff float64
-
-						block := head
-						for i := 0; i < 64; i++ {
-							diff += float64(block.Difficulty().Uint64())
-							if parent := chain.GetBlock(block.ParentHash(), block.NumberU64()-1); parent == nil {
-								break
-							} else {
-								block = parent
-							}
-						}
-						// Estimate an ETA based on the block times and the difficulty growth
-						growth := diff / float64(head.Time()-block.Time()+1) // +1 to avoid div by zero
-						if growth > 0 {
-							if left := new(big.Int).Sub(ttd, htd); left.IsUint64() {
-								eta = time.Duration(float64(left.Uint64())/growth) * time.Second
-							} else {
-								eta = time.Duration(new(big.Int).Div(left, big.NewInt(int64(growth))).Uint64()) * time.Second
-							}
-						}
-					}
-					var message string
-					if htd.Cmp(ttd) > 0 {
-						if lastTransitionUpdate.IsZero() {
-							message = "Merge already reached, but no beacon client seen. Please launch one to follow the chain!"
-						} else {
-							message = "Merge already reached, but previously seen beacon client is offline. Please ensure it is operational to follow the chain!"
-						}
-					} else {
-						if lastTransitionUpdate.IsZero() {
-							message = "Merge is configured, but no beacon client seen. Please ensure you have one available before the transition arrives!"
-						} else {
-							message = "Merge is configured, but previously seen beacon client is offline. Please ensure it is operational before the transition arrives!"
-						}
-					}
-					if eta == 0 {
-						log.Warn(message)
-					} else {
-						log.Warn(message, "eta", common.PrettyAge(time.Now().Add(-eta))) // weird hack, but duration formatted doens't handle days
-					}
-					offlineLogged = time.Now()
+			if time.Since(offlineLogged) > beaconUpdateWarnFrequency {
+				if lastForkchoiceUpdate.IsZero() && lastNewPayloadUpdate.IsZero() {
+					log.Warn("Beacon client online, but never received consensus updates. Please ensure your beacon client is operational to follow the chain!")
+				} else {
+					log.Warn("Beacon client online, but no consensus updates received in a while. Please fix your beacon client to follow the chain!")
 				}
+				offlineLogged = time.Now()
+			}
+			continue
+		}
+		if time.Since(lastTransitionUpdate) <= beaconUpdateExchangeTimeout {
+			offlineLogged = time.Time{}
+			continue
+		}
+		if time.Since(offlineLogged) > beaconUpdateWarnFrequency {
+			// Retrieve the last few blocks and make a rough estimate as
+			// to when the merge transition should happen
+			var (
+				chain = api.eth.BlockChain()
+				head  = chain.CurrentHeader()
+				htd   = chain.GetTd(head.Hash(), head.Number.Uint64())
+			)
+			if htd.Cmp(ttd) >= 0 {
+				if lastTransitionUpdate.IsZero() {
+					log.Warn("Merge already reached, but no beacon client seen. Please launch one to follow the chain!")
+				} else {
+					log.Warn("Merge already reached, but previously seen beacon client is offline. Please ensure it is operational to follow the chain!")
+				}
+				offlineLogged = time.Now()
 				continue
 			}
+			var eta time.Duration
+			if head.Number.Uint64() > 0 {
+				// Accumulate the last 64 difficulties to estimate the growth
+				var (
+					deltaDiff uint64
+					deltaTime uint64
+					current   = head
+				)
+				for i := 0; i < 64; i++ {
+					parent := chain.GetHeader(current.ParentHash, current.Number.Uint64()-1)
+					if parent == nil {
+						break
+					}
+					deltaDiff += current.Difficulty.Uint64()
+					deltaTime += current.Time - parent.Time
+					current = parent
+				}
+				// Estimate an ETA based on the block times and the difficulty growth
+				if deltaTime > 0 {
+					growth := deltaDiff / deltaTime
+					left := new(big.Int).Sub(ttd, htd)
+					eta = time.Duration(new(big.Int).Div(left, new(big.Int).SetUint64(growth+1)).Uint64()) * time.Second
+				}
+			}
+			message := "Merge is configured, but previously seen beacon client is offline. Please ensure it is operational before the transition arrives!"
+			if lastTransitionUpdate.IsZero() {
+				message = "Merge is configured, but no beacon client seen. Please ensure you have one available before the transition arrives!"
+			}
+			if eta < time.Second {
+				log.Warn(message)
+			} else {
+				log.Warn(message, "eta", common.PrettyAge(time.Now().Add(-eta))) // weird hack, but duration formatted doesn't handle days
+			}
+			offlineLogged = time.Now()
 		}
 	}
 }
