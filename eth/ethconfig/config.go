@@ -208,6 +208,14 @@ type Config struct {
 
 	// OverrideShanghai (TODO: remove after the fork)
 	OverrideShanghai *big.Int `toml:",omitempty"`
+
+	OverrideOptimismBedrock *big.Int
+	OverrideOptimism        *bool
+
+	RollupSequencerHTTP string
+	RollupHistoricalRPC string
+
+	RollupDisableTxPoolGossip bool
 }
 
 // CreateConsensusEngine creates a consensus engine for the given chain configuration.

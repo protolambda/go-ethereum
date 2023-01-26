@@ -65,6 +65,8 @@ var (
 		utils.USBFlag,
 		utils.SmartCardDaemonPathFlag,
 		utils.OverrideShanghai,
+		utils.OverrideOptimismBedrock,
+		utils.OverrideOptimism,
 		utils.EthashCacheDirFlag,
 		utils.EthashCachesInMemoryFlag,
 		utils.EthashCachesOnDiskFlag,
@@ -148,6 +150,9 @@ var (
 		utils.GpoMaxGasPriceFlag,
 		utils.GpoIgnoreGasPriceFlag,
 		utils.MinerNotifyFullFlag,
+		utils.RollupSequencerHTTPFlag,
+		utils.RollupHistoricalRPCFlag,
+		utils.RollupDisableTxPoolGossipFlag,
 		configFileFlag,
 	}, utils.NetworkFlags, utils.DatabasePathFlags)
 

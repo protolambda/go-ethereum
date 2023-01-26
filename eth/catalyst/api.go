@@ -136,6 +136,9 @@ func NewConsensusAPI(eth *eth.Ethereum) *ConsensusAPI {
 		invalidTipsets:    make(map[common.Hash]*types.Header),
 	}
 	eth.Downloader().SetBadBlockCallback(api.setInvalidAncestor)
+	if api.eth.BlockChain().Config().Optimism != nil { // don't start the api heartbeat, there is no transition
+		return api
+	}
 	go api.heartbeat()
 
 	return api
@@ -236,7 +239,7 @@ func (api *ConsensusAPI) ForkchoiceUpdatedV1(update beacon.ForkchoiceStateV1, pa
 		// If the specified head matches with our local head, do nothing and keep
 		// generating the payload. It's a special corner case that a few slots are
 		// missing and we are requested to generate the payload in slot.
-	} else {
+	} else if api.eth.BlockChain().Config().Optimism == nil { // minor Engine API divergence: allow proposers to reorg their own chain
 		// If the head block is already in our canonical chain, the beacon client is
 		// probably resyncing. Ignore the update.
 		log.Info("Ignoring beacon update to old head", "number", block.NumberU64(), "hash", update.HeadBlockHash, "age", common.PrettyAge(time.Unix(int64(block.Time()), 0)), "have", api.eth.BlockChain().CurrentBlock().NumberU64())
@@ -280,11 +283,25 @@ func (api *ConsensusAPI) ForkchoiceUpdatedV1(update beacon.ForkchoiceStateV1, pa
 	// sealed by the beacon client. The payload will be requested later, and we
 	// will replace it arbitrarily many times in between.
 	if payloadAttributes != nil {
+		if api.eth.BlockChain().Config().Optimism != nil && payloadAttributes.GasLimit == nil {
+			return beacon.STATUS_INVALID, beacon.InvalidPayloadAttributes.With(errors.New("gasLimit parameter is required"))
+		}
+		transactions := make(types.Transactions, 0, len(payloadAttributes.Transactions))
+		for i, otx := range payloadAttributes.Transactions {
+			var tx types.Transaction
+			if err := tx.UnmarshalBinary(otx); err != nil {
+				return beacon.STATUS_INVALID, fmt.Errorf("transaction %d is not valid: %v", i, err)
+			}
+			transactions = append(transactions, &tx)
+		}
 		args := &miner.BuildPayloadArgs{
 			Parent:       update.HeadBlockHash,
 			Timestamp:    payloadAttributes.Timestamp,
 			FeeRecipient: payloadAttributes.SuggestedFeeRecipient,
 			Random:       payloadAttributes.Random,
+			NoTxPool:     payloadAttributes.NoTxPool,
+			Transactions: transactions,
+			GasLimit:     payloadAttributes.GasLimit,
 		}
 		id := args.Id()
 		// If we already are busy generating this work, then we do not need
@@ -295,7 +312,7 @@ func (api *ConsensusAPI) ForkchoiceUpdatedV1(update beacon.ForkchoiceStateV1, pa
 		payload, err := api.eth.Miner().BuildPayload(args)
 		if err != nil {
 			log.Error("Failed to build payload", "err", err)
-			return valid(nil), beacon.InvalidPayloadAttributes.With(err)
+			return beacon.STATUS_INVALID, beacon.InvalidPayloadAttributes.With(err)
 		}
 		api.localBlocks.put(id, payload)
 		return valid(&id), nil

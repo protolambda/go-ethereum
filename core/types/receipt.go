@@ -69,6 +69,12 @@ type Receipt struct {
 	BlockHash        common.Hash `json:"blockHash,omitempty"`
 	BlockNumber      *big.Int    `json:"blockNumber,omitempty"`
 	TransactionIndex uint        `json:"transactionIndex"`
+
+	// OVM legacy: extend receipts with their L1 price (if a rollup tx)
+	L1GasPrice *big.Int   `json:"l1GasPrice,omitempty"`
+	L1GasUsed  *big.Int   `json:"l1GasUsed,omitempty"`
+	L1Fee      *big.Int   `json:"l1Fee,omitempty"`
+	FeeScalar  *big.Float `json:"l1FeeScalar,omitempty"`
 }
 
 type receiptMarshaling struct {
@@ -79,6 +85,12 @@ type receiptMarshaling struct {
 	GasUsed           hexutil.Uint64
 	BlockNumber       *hexutil.Big
 	TransactionIndex  hexutil.Uint
+
+	// Optimism: extend receipts with their L1 price (if a rollup tx)
+	L1GasPrice *hexutil.Big
+	L1GasUsed  *hexutil.Big
+	L1Fee      *hexutil.Big
+	FeeScalar  *big.Float
 }
 
 // receiptRLP is the consensus encoding of a receipt.
@@ -94,6 +106,72 @@ type storedReceiptRLP struct {
 	PostStateOrStatus []byte
 	CumulativeGasUsed uint64
 	Logs              []*Log
+}
+
+// LegacyOptimismStoredReceiptRLP is the pre bedrock storage encoding of a
+// receipt. It will only exist in the database if it was migrated using the
+// migration tool. Nodes that sync using snap-sync will not have any of these
+// entries.
+type LegacyOptimismStoredReceiptRLP struct {
+	PostStateOrStatus []byte
+	CumulativeGasUsed uint64
+	Logs              []*LogForStorage
+	L1GasUsed         *big.Int
+	L1GasPrice        *big.Int
+	L1Fee             *big.Int
+	FeeScalar         string
+}
+
+// LogForStorage is a wrapper around a Log that handles
+// backward compatibility with prior storage formats.
+type LogForStorage Log
+
+// EncodeRLP implements rlp.Encoder.
+func (l *LogForStorage) EncodeRLP(w io.Writer) error {
+	rl := rlpLog{Address: l.Address, Topics: l.Topics, Data: l.Data}
+	return rlp.Encode(w, &rl)
+}
+
+type legacyRlpStorageLog struct {
+	Address     common.Address
+	Topics      []common.Hash
+	Data        []byte
+	BlockNumber uint64
+	TxHash      common.Hash
+	TxIndex     uint
+	BlockHash   common.Hash
+	Index       uint
+}
+
+// DecodeRLP implements rlp.Decoder.
+//
+// Note some redundant fields(e.g. block number, tx hash etc) will be assembled later.
+func (l *LogForStorage) DecodeRLP(s *rlp.Stream) error {
+	blob, err := s.Raw()
+	if err != nil {
+		return err
+	}
+	var dec rlpLog
+	err = rlp.DecodeBytes(blob, &dec)
+	if err == nil {
+		*l = LogForStorage{
+			Address: dec.Address,
+			Topics:  dec.Topics,
+			Data:    dec.Data,
+		}
+	} else {
+		// Try to decode log with previous definition.
+		var dec legacyRlpStorageLog
+		err = rlp.DecodeBytes(blob, &dec)
+		if err == nil {
+			*l = LogForStorage{
+				Address: dec.Address,
+				Topics:  dec.Topics,
+				Data:    dec.Data,
+			}
+		}
+	}
+	return err
 }
 
 // NewReceipt creates a barebone transaction receipt, copying the init fields.
@@ -193,7 +271,7 @@ func (r *Receipt) decodeTyped(b []byte) error {
 		return errShortTypedReceipt
 	}
 	switch b[0] {
-	case DynamicFeeTxType, AccessListTxType:
+	case DynamicFeeTxType, AccessListTxType, DepositTxType:
 		var data receiptRLP
 		err := rlp.DecodeBytes(b[1:], &data)
 		if err != nil {
@@ -271,6 +349,53 @@ func (r *ReceiptForStorage) EncodeRLP(_w io.Writer) error {
 // DecodeRLP implements rlp.Decoder, and loads both consensus and implementation
 // fields of a receipt from an RLP stream.
 func (r *ReceiptForStorage) DecodeRLP(s *rlp.Stream) error {
+	// Try decoding from the newest format for future proofness, then the older one
+	// for old nodes that just upgraded. V4 was an intermediate unreleased format so
+	// we do need to decode it, but it's not common (try last).
+	if err := decodeStoredReceiptRLP(r, s); err == nil {
+		return nil
+	}
+	return decodeLegacyOptimismReceiptRLP(r, s)
+}
+
+func decodeLegacyOptimismReceiptRLP(r *ReceiptForStorage, s *rlp.Stream) error {
+	// Retrieve the entire receipt blob as we need to try multiple decoders
+	blob, err := s.Raw()
+	if err != nil {
+		return err
+	}
+	var stored LegacyOptimismStoredReceiptRLP
+	if err := rlp.DecodeBytes(blob, &stored); err != nil {
+		return err
+	}
+	if err := (*Receipt)(r).setStatus(stored.PostStateOrStatus); err != nil {
+		return err
+	}
+	r.CumulativeGasUsed = stored.CumulativeGasUsed
+	r.Logs = make([]*Log, len(stored.Logs))
+	for i, log := range stored.Logs {
+		r.Logs[i] = (*Log)(log)
+	}
+	r.Bloom = CreateBloom(Receipts{(*Receipt)(r)})
+
+	// UsingOVM
+	scalar := new(big.Float)
+	if stored.FeeScalar != "" {
+		var ok bool
+		scalar, ok = scalar.SetString(stored.FeeScalar)
+		if !ok {
+			return errors.New("cannot parse fee scalar")
+		}
+	}
+	r.L1GasUsed = stored.L1GasUsed
+	r.L1GasPrice = stored.L1GasPrice
+	r.L1Fee = stored.L1Fee
+	r.FeeScalar = scalar
+
+	return nil
+}
+
+func decodeStoredReceiptRLP(r *ReceiptForStorage, s *rlp.Stream) error {
 	var stored storedReceiptRLP
 	if err := s.Decode(&stored); err != nil {
 		return err
@@ -303,6 +428,9 @@ func (rs Receipts) EncodeIndex(i int, w *bytes.Buffer) {
 		rlp.Encode(w, data)
 	case DynamicFeeTxType:
 		w.WriteByte(DynamicFeeTxType)
+		rlp.Encode(w, data)
+	case DepositTxType:
+		w.WriteByte(DepositTxType)
 		rlp.Encode(w, data)
 	default:
 		// For unsupported types, write nothing. Since this is for
@@ -352,5 +480,26 @@ func (rs Receipts) DeriveFields(config *params.ChainConfig, hash common.Hash, nu
 			logIndex++
 		}
 	}
+	if config.Optimism != nil && len(txs) >= 2 { // need at least an info tx and a non-info tx
+		if data := txs[0].Data(); len(data) >= 4+32*8 { // function selector + 8 arguments to setL1BlockValues
+			l1Basefee := new(big.Int).SetBytes(data[4+32*2 : 4+32*3]) // arg index 2
+			overhead := new(big.Int).SetBytes(data[4+32*6 : 4+32*7])  // arg index 6
+			scalar := new(big.Int).SetBytes(data[4+32*7 : 4+32*8])    // arg index 7
+			fscalar := new(big.Float).SetInt(scalar)                  // legacy: format fee scalar as big Float
+			fdivisor := new(big.Float).SetUint64(1_000_000)           // 10**6, i.e. 6 decimals
+			feeScalar := new(big.Float).Quo(fscalar, fdivisor)
+			for i := 0; i < len(rs); i++ {
+				if !txs[i].IsDepositTx() {
+					rs[i].L1GasPrice = l1Basefee
+					rs[i].L1GasUsed = new(big.Int).SetUint64(txs[i].RollupDataGas())
+					rs[i].L1Fee = L1Cost(txs[i].RollupDataGas(), l1Basefee, overhead, scalar)
+					rs[i].FeeScalar = feeScalar
+				}
+			}
+		} else {
+			return fmt.Errorf("L1 info tx only has %d bytes, cannot read gas price parameters", len(data))
+		}
+	}
+
 	return nil
 }

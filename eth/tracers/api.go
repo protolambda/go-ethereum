@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/big"
 	"os"
 	"runtime"
 	"sync"
@@ -88,6 +89,7 @@ type Backend interface {
 	ChainDb() ethdb.Database
 	StateAtBlock(ctx context.Context, block *types.Block, reexec uint64, base *state.StateDB, readOnly bool, preferDisk bool) (*state.StateDB, StateReleaseFunc, error)
 	StateAtTransaction(ctx context.Context, block *types.Block, txIndex int, reexec uint64) (core.Message, vm.BlockContext, *state.StateDB, StateReleaseFunc, error)
+	HistoricalRPCService() *rpc.Client
 }
 
 // API is the collection of tracing APIs exposed over the private debugging endpoint.
@@ -231,6 +233,7 @@ type txTraceTask struct {
 // TraceChain returns the structured logs created during the execution of EVM
 // between two blocks (excluding start) and returns them as a JSON object.
 func (api *API) TraceChain(ctx context.Context, start, end rpc.BlockNumber, config *TraceConfig) (*rpc.Subscription, error) { // Fetch the block interval that we want to trace
+	// TODO: Need to implement a fallback for this
 	from, err := api.blockByNumber(ctx, start)
 	if err != nil {
 		return nil, err
@@ -291,6 +294,7 @@ func (api *API) traceChain(start, end *types.Block, config *TraceConfig, closed 
 					signer   = types.MakeSigner(api.backend.ChainConfig(), task.block.Number())
 					blockCtx = core.NewEVMBlockContext(task.block.Header(), api.chainContext(ctx), nil)
 				)
+				blockCtx.L1CostFunc = types.NewL1CostFunc(api.backend.ChainConfig(), task.statedb)
 				// Trace all the transactions contained within
 				for i, tx := range task.block.Transactions() {
 					msg, _ := tx.AsMessage(signer, task.block.BaseFee())
@@ -458,6 +462,20 @@ func (api *API) TraceBlockByNumber(ctx context.Context, number rpc.BlockNumber, 
 	if err != nil {
 		return nil, err
 	}
+
+	if api.backend.ChainConfig().IsOptimismPreBedrock(block.Number()) {
+		if api.backend.HistoricalRPCService() != nil {
+			var histResult []*txTraceResult
+			err = api.backend.HistoricalRPCService().CallContext(ctx, &histResult, "debug_traceBlockByNumber", number, config)
+			if err != nil {
+				return nil, fmt.Errorf("historical backend error: %w", err)
+			}
+			return histResult, nil
+		} else {
+			return nil, rpc.ErrNoHistoricalFallback
+		}
+	}
+
 	return api.traceBlock(ctx, block, config)
 }
 
@@ -468,6 +486,20 @@ func (api *API) TraceBlockByHash(ctx context.Context, hash common.Hash, config *
 	if err != nil {
 		return nil, err
 	}
+
+	if api.backend.ChainConfig().IsOptimismPreBedrock(block.Number()) {
+		if api.backend.HistoricalRPCService() != nil {
+			var histResult []*txTraceResult
+			err = api.backend.HistoricalRPCService().CallContext(ctx, &histResult, "debug_traceBlockByHash", hash, config)
+			if err != nil {
+				return nil, fmt.Errorf("historical backend error: %w", err)
+			}
+			return histResult, nil
+		} else {
+			return nil, rpc.ErrNoHistoricalFallback
+		}
+	}
+
 	return api.traceBlock(ctx, block, config)
 }
 
@@ -517,6 +549,7 @@ func (api *API) StandardTraceBlockToFile(ctx context.Context, hash common.Hash, 
 // of intermediate roots: the stateroot after each transaction.
 func (api *API) IntermediateRoots(ctx context.Context, hash common.Hash, config *TraceConfig) ([]common.Hash, error) {
 	block, _ := api.blockByHash(ctx, hash)
+	// TODO: Cannot get intermediate roots for pre-bedrock block without daisy chain
 	if block == nil {
 		// Check in the bad blocks
 		block = rawdb.ReadBadBlock(api.backend.ChainDb(), hash)
@@ -548,6 +581,7 @@ func (api *API) IntermediateRoots(ctx context.Context, hash common.Hash, config 
 		vmctx              = core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
 		deleteEmptyObjects = chainConfig.IsEIP158(block.Number())
 	)
+	vmctx.L1CostFunc = types.NewL1CostFunc(chainConfig, statedb)
 	for i, tx := range block.Transactions() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -653,7 +687,6 @@ func (api *API) traceBlockParallel(ctx context.Context, block *types.Block, stat
 	var (
 		txs       = block.Transactions()
 		blockHash = block.Hash()
-		blockCtx  = core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
 		signer    = types.MakeSigner(api.backend.ChainConfig(), block.Number())
 		results   = make([]*txTraceResult, len(txs))
 		pend      sync.WaitGroup
@@ -669,6 +702,8 @@ func (api *API) traceBlockParallel(ctx context.Context, block *types.Block, stat
 			defer pend.Done()
 			// Fetch and execute the next transaction trace tasks
 			for task := range jobs {
+				blockCtx := core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
+				blockCtx.L1CostFunc = types.NewL1CostFunc(api.backend.ChainConfig(), task.statedb)
 				msg, _ := txs[task.index].AsMessage(signer, block.BaseFee())
 				txctx := &Context{
 					BlockHash: blockHash,
@@ -685,6 +720,8 @@ func (api *API) traceBlockParallel(ctx context.Context, block *types.Block, stat
 		}()
 	}
 
+	blockCtx := core.NewEVMBlockContext(block.Header(), api.chainContext(ctx), nil)
+	blockCtx.L1CostFunc = types.NewL1CostFunc(api.backend.ChainConfig(), statedb)
 	// Feed the transactions into the tracers and return
 	var failed error
 txloop:
@@ -784,6 +821,7 @@ func (api *API) standardTraceBlockToFile(ctx context.Context, block *types.Block
 			canon = false
 		}
 	}
+	vmctx.L1CostFunc = types.NewL1CostFunc(chainConfig, statedb)
 	for i, tx := range block.Transactions() {
 		// Prepare the transaction for un-traced execution
 		var (
@@ -863,6 +901,20 @@ func (api *API) TraceTransaction(ctx context.Context, hash common.Hash, config *
 	if tx == nil {
 		return nil, errTxNotFound
 	}
+
+	if api.backend.ChainConfig().IsOptimismPreBedrock(new(big.Int).SetUint64(blockNumber)) {
+		if api.backend.HistoricalRPCService() != nil {
+			var histResult json.RawMessage
+			err := api.backend.HistoricalRPCService().CallContext(ctx, &histResult, "debug_traceTransaction", hash, config)
+			if err != nil {
+				return nil, fmt.Errorf("historical backend error: %w", err)
+			}
+			return histResult, nil
+		} else {
+			return nil, rpc.ErrNoHistoricalFallback
+		}
+	}
+
 	// It shouldn't happen in practice.
 	if blockNumber == 0 {
 		return nil, errors.New("genesis is not traceable")
@@ -916,6 +968,11 @@ func (api *API) TraceCall(ctx context.Context, args ethapi.TransactionArgs, bloc
 	if err != nil {
 		return nil, err
 	}
+
+	if api.backend.ChainConfig().IsOptimismPreBedrock(block.Number()) {
+		return nil, errors.New("l2geth does not have a debug_traceCall method")
+	}
+
 	// try to recompute the state
 	reexec := defaultTraceReexec
 	if config != nil && config.Reexec != nil {
@@ -935,6 +992,7 @@ func (api *API) TraceCall(ctx context.Context, args ethapi.TransactionArgs, bloc
 		}
 		config.BlockOverrides.Apply(&vmctx)
 	}
+	vmctx.L1CostFunc = types.NewL1CostFunc(api.backend.ChainConfig(), statedb)
 	// Execute the trace
 	msg, err := args.ToMessage(api.backend.RPCGasCap(), block.BaseFee())
 	if err != nil {
