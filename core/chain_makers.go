@@ -41,13 +41,28 @@ type BlockGen struct {
 	header  *types.Header
 	statedb *state.StateDB
 
-	gasPool  *GasPool
-	txs      []*types.Transaction
-	receipts []*types.Receipt
-	uncles   []*types.Header
+	gasPool     *GasPool
+	txs         []*types.Transaction
+	receipts    []*types.Receipt
+	uncles      []*types.Header
+	withdrawals []*types.Withdrawal
 
 	config *params.ChainConfig
 	engine consensus.Engine
+}
+
+// AddWithdrawal adds a withdrawal to the generated block.
+func (b *BlockGen) AddWithdrawal(w *types.Withdrawal) {
+	// The withdrawal will be assigned the next valid index.
+	var idx uint64
+	for i := b.i - 1; i >= 0; i-- {
+		if wd := b.chain[i].Withdrawals(); len(wd) != 0 {
+			idx = wd[len(wd)-1].Index + 1
+			break
+		}
+	}
+	w.Index = idx
+	b.withdrawals = append(b.withdrawals, w)
 }
 
 // SetCoinbase sets the coinbase of the generated block.
@@ -60,7 +75,7 @@ func (b *BlockGen) SetCoinbase(addr common.Address) {
 		panic("coinbase can only be set once")
 	}
 	b.header.Coinbase = addr
-	b.gasPool = new(GasPool).AddGas(b.header.GasLimit)
+	b.gasPool = new(GasPool).AddGas(b.header.GasLimit).AddDataGas(params.MaxDataGasPerBlock)
 }
 
 // SetExtra sets the extra data field of the generated block.
@@ -97,7 +112,7 @@ func (b *BlockGen) addTx(bc *BlockChain, vmConfig vm.Config, tx *types.Transacti
 		b.SetCoinbase(common.Address{})
 	}
 	b.statedb.SetTxContext(tx.Hash(), len(b.txs))
-	receipt, err := ApplyTransaction(b.config, bc, &b.header.Coinbase, b.gasPool, b.statedb, b.header, tx, &b.header.GasUsed, vmConfig)
+	receipt, err := ApplyTransaction(b.config, bc, &b.header.Coinbase, b.gasPool, b.statedb, b.header, b.parent.Header().ExcessDataGas, tx, &b.header.GasUsed, vmConfig)
 	if err != nil {
 		panic(err)
 	}
@@ -153,6 +168,10 @@ func (b *BlockGen) AddUncheckedTx(tx *types.Transaction) {
 // Number returns the block number of the block being generated.
 func (b *BlockGen) Number() *big.Int {
 	return new(big.Int).Set(b.header.Number)
+}
+
+func (b *BlockGen) Time() uint64 {
+	return b.header.Time
 }
 
 // BaseFee returns the EIP-1559 base fee of the block being generated.
@@ -282,7 +301,14 @@ func GenerateChain(config *params.ChainConfig, parent *types.Block, engine conse
 		}
 		if b.engine != nil {
 			// Finalize and seal the block
-			block, _ := b.engine.FinalizeAndAssemble(chainreader, b.header, statedb, b.txs, b.uncles, b.receipts)
+			shanghai := config.IsShanghai(b.header.TimeBig())
+			if shanghai && b.withdrawals == nil {
+				// need to make empty list to denote non-nil, but empty withdrawals to calc withdrawals hash
+				b.withdrawals = make([]*types.Withdrawal, 0)
+			} else if !shanghai && b.withdrawals != nil {
+				panic("withdrawals set before activation")
+			}
+			block, _ := b.engine.FinalizeAndAssemble(chainreader, b.header, statedb, b.txs, b.uncles, b.receipts, b.withdrawals)
 
 			// Write state changes to db
 			root, err := statedb.Commit(config.IsEIP158(b.header.Number))
@@ -403,4 +429,9 @@ func (cr *fakeChainReader) GetHeaderByNumber(number uint64) *types.Header       
 func (cr *fakeChainReader) GetHeaderByHash(hash common.Hash) *types.Header          { return nil }
 func (cr *fakeChainReader) GetHeader(hash common.Hash, number uint64) *types.Header { return nil }
 func (cr *fakeChainReader) GetBlock(hash common.Hash, number uint64) *types.Block   { return nil }
-func (cr *fakeChainReader) GetTd(hash common.Hash, number uint64) *big.Int          { return nil }
+func (cr *fakeChainReader) GetTd(hash common.Hash, number uint64) *big.Int {
+	if cr.config.TerminalTotalDifficultyPassed {
+		return cr.config.TerminalTotalDifficulty
+	}
+	return nil
+}

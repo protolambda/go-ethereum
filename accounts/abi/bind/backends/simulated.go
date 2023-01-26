@@ -716,12 +716,18 @@ func (b *SimulatedBackend) callContract(ctx context.Context, call ethereum.CallM
 	msg := callMsg{call}
 
 	txContext := core.NewEVMTxContext(msg)
-	evmContext := core.NewEVMBlockContext(block.Header(), b.blockchain, nil)
+	var excessDataGas *big.Int
+	// Get the last block header
+	ph := b.blockchain.GetHeaderByHash(block.ParentHash())
+	if ph != nil {
+		excessDataGas = ph.ExcessDataGas
+	}
+	evmContext := core.NewEVMBlockContext(block.Header(), excessDataGas, b.blockchain, nil)
 	evmContext.L1CostFunc = types.NewL1CostFunc(b.config, stateDB)
 	// Create a new environment which holds all relevant information
 	// about the transaction and calling mechanisms.
 	vmEnv := vm.NewEVM(evmContext, txContext, stateDB, b.config, vm.Config{NoBaseFee: true})
-	gasPool := new(core.GasPool).AddGas(math.MaxUint64)
+	gasPool := new(core.GasPool).AddGas(math.MaxUint64).AddDataGas(params.MaxDataGasPerBlock)
 
 	return core.NewStateTransition(vmEnv, msg, gasPool).TransitionDb()
 }
@@ -737,7 +743,7 @@ func (b *SimulatedBackend) SendTransaction(ctx context.Context, tx *types.Transa
 		return fmt.Errorf("could not fetch parent")
 	}
 	// Check transaction validity
-	signer := types.MakeSigner(b.blockchain.Config(), block.Number())
+	signer := types.MakeSigner(b.blockchain.Config(), block.Number(), block.Time())
 	sender, err := types.Sender(signer, tx)
 	if err != nil {
 		return fmt.Errorf("invalid transaction: %v", err)
@@ -899,6 +905,8 @@ func (m callMsg) To() *common.Address          { return m.CallMsg.To }
 func (m callMsg) GasPrice() *big.Int           { return m.CallMsg.GasPrice }
 func (m callMsg) GasFeeCap() *big.Int          { return m.CallMsg.GasFeeCap }
 func (m callMsg) GasTipCap() *big.Int          { return m.CallMsg.GasTipCap }
+func (m callMsg) DataGas() uint64              { return params.DataGasPerBlob * uint64(len(m.CallMsg.DataHashes)) }
+func (m callMsg) MaxFeePerDataGas() *big.Int   { return m.CallMsg.MaxFeePerDataGas }
 func (m callMsg) Gas() uint64                  { return m.CallMsg.Gas }
 func (m callMsg) Value() *big.Int              { return m.CallMsg.Value }
 func (m callMsg) Data() []byte                 { return m.CallMsg.Data }
@@ -907,6 +915,7 @@ func (m callMsg) IsSystemTx() bool             { return false }
 func (m callMsg) IsDepositTx() bool            { return false }
 func (m callMsg) Mint() *big.Int               { return nil }
 func (m callMsg) RollupDataGas() uint64        { return 0 }
+func (m callMsg) DataHashes() []common.Hash    { return m.CallMsg.DataHashes }
 
 // filterBackend implements filters.Backend to support filtering for logs without
 // taking bloom-bits acceleration structures into account.

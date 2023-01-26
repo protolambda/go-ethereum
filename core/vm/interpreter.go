@@ -60,6 +60,8 @@ func NewEVMInterpreter(evm *EVM, cfg Config) *EVMInterpreter {
 	// If jump table was not initialised we set the default one.
 	if cfg.JumpTable == nil {
 		switch {
+		case evm.chainRules.IsSharding:
+			cfg.JumpTable = &shardingInstructionSet
 		case evm.chainRules.IsShanghai:
 			cfg.JumpTable = &shanghaiInstructionSet
 		case evm.chainRules.IsMerge:

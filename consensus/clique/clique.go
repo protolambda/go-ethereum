@@ -345,6 +345,14 @@ func (c *Clique) verifyCascadingFields(chain consensus.ChainHeaderReader, header
 		// Verify the header's EIP-1559 attributes.
 		return err
 	}
+	if !chain.Config().IsSharding(header.TimeBig()) {
+		if header.ExcessDataGas != nil {
+			return fmt.Errorf("invalid excessDataGas before fork: have %v, want <nil>", header.ExcessDataGas)
+		}
+	} else if err := misc.VerifyEip4844Header(chain.Config(), parent, header); err != nil {
+		// Verify the header's EIP-4844 attributes.
+		return err
+	}
 	// Retrieve the snapshot needed to verify this header and cache it
 	snap, err := c.snapshot(chain, number-1, header.ParentHash, parents)
 	if err != nil {
@@ -564,17 +572,24 @@ func (c *Clique) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 
 // Finalize implements consensus.Engine, ensuring no uncles are set, nor block
 // rewards given.
-func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header) {
+func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal) {
 	// No block rewards in PoA, so the state remains as is and uncles are dropped
 	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
 	header.UncleHash = types.CalcUncleHash(nil)
+	if chain.Config().IsSharding(header.TimeBig()) {
+		if parent := chain.GetHeaderByHash(header.ParentHash); parent != nil {
+			header.SetExcessDataGas(misc.CalcExcessDataGas(parent.ExcessDataGas, misc.CountBlobs(txs)))
+		} else {
+			header.SetExcessDataGas(new(big.Int))
+		}
+	}
 }
 
 // FinalizeAndAssemble implements consensus.Engine, ensuring no uncles are set,
 // nor block rewards given, and returns the final block.
-func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
+func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, withdrawals []*types.Withdrawal) (*types.Block, error) {
 	// Finalize block
-	c.Finalize(chain, header, state, txs, uncles)
+	c.Finalize(chain, header, state, txs, uncles, nil)
 
 	// Assemble and return the final block for sealing
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
@@ -742,6 +757,12 @@ func encodeSigHeader(w io.Writer, header *types.Header) {
 	}
 	if header.BaseFee != nil {
 		enc = append(enc, header.BaseFee)
+	}
+	if header.WithdrawalsHash != nil && *header.WithdrawalsHash != types.EmptyRootHash {
+		panic("unexpected withdrawal hash value in clique")
+	}
+	if header.ExcessDataGas != nil {
+		enc = append(enc, header.ExcessDataGas)
 	}
 	if err := rlp.Encode(w, enc); err != nil {
 		panic("can't encode: " + err.Error())

@@ -70,7 +70,7 @@ func (q *payloadQueue) put(id beacon.PayloadID, payload *miner.Payload) {
 }
 
 // get retrieves a previously stored payload item or nil if it does not exist.
-func (q *payloadQueue) get(id beacon.PayloadID) *beacon.ExecutableDataV1 {
+func (q *payloadQueue) get(id beacon.PayloadID) *beacon.ExecutableDataV2 {
 	q.lock.RLock()
 	defer q.lock.RUnlock()
 
@@ -83,6 +83,22 @@ func (q *payloadQueue) get(id beacon.PayloadID) *beacon.ExecutableDataV1 {
 		}
 	}
 	return nil
+}
+
+// get retrieves a previously stored blobs bundle item or nil if it does not exist.
+func (q *payloadQueue) getBlobsBundle(id beacon.PayloadID) (*beacon.BlobsBundle, error) {
+	q.lock.RLock()
+	defer q.lock.RUnlock()
+
+	for _, item := range q.payloads {
+		if item == nil {
+			return nil, nil // no more items
+		}
+		if item.id == id {
+			return item.payload.ResolveToBlobsBundle()
+		}
+	}
+	return nil, nil
 }
 
 // has checks if a particular payload is already tracked.

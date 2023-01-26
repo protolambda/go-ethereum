@@ -123,7 +123,6 @@ func Execute(code, input []byte, cfg *Config) ([]byte, *state.StateDB, error) {
 	// - prepare accessList(post-berlin)
 	// - reset transient storage(eip 1153)
 	cfg.State.Prepare(rules, cfg.Origin, cfg.Coinbase, &address, vm.ActivePrecompiles(rules), nil)
-
 	cfg.State.CreateAccount(address)
 	// set the receiver's (the executing contract) code for execution.
 	cfg.State.SetCode(address, code)

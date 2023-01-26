@@ -8,24 +8,27 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 )
 
 var _ = (*payloadAttributesMarshaling)(nil)
 
 // MarshalJSON marshals as JSON.
-func (p PayloadAttributesV1) MarshalJSON() ([]byte, error) {
-	type PayloadAttributesV1 struct {
-		Timestamp             hexutil.Uint64  `json:"timestamp"     gencodec:"required"`
-		Random                common.Hash     `json:"prevRandao"        gencodec:"required"`
-		SuggestedFeeRecipient common.Address  `json:"suggestedFeeRecipient"  gencodec:"required"`
-		Transactions          []hexutil.Bytes `json:"transactions,omitempty"  gencodec:"optional"`
-		NoTxPool              bool            `json:"noTxPool,omitempty" gencodec:"optional"`
-		GasLimit              *hexutil.Uint64 `json:"gasLimit,omitempty" gencodec:"optional"`
+func (p PayloadAttributes) MarshalJSON() ([]byte, error) {
+	type PayloadAttributes struct {
+		Timestamp             hexutil.Uint64      `json:"timestamp"     gencodec:"required"`
+		Random                common.Hash         `json:"prevRandao"        gencodec:"required"`
+		SuggestedFeeRecipient common.Address      `json:"suggestedFeeRecipient"  gencodec:"required"`
+		Withdrawals           []*types.Withdrawal `json:"withdrawals"`
+		Transactions          []hexutil.Bytes     `json:"transactions,omitempty"  gencodec:"optional"`
+		NoTxPool              bool                `json:"noTxPool,omitempty" gencodec:"optional"`
+		GasLimit              *hexutil.Uint64     `json:"gasLimit,omitempty" gencodec:"optional"`
 	}
-	var enc PayloadAttributesV1
+	var enc PayloadAttributes
 	enc.Timestamp = hexutil.Uint64(p.Timestamp)
 	enc.Random = p.Random
 	enc.SuggestedFeeRecipient = p.SuggestedFeeRecipient
+	enc.Withdrawals = p.Withdrawals
 	if p.Transactions != nil {
 		enc.Transactions = make([]hexutil.Bytes, len(p.Transactions))
 		for k, v := range p.Transactions {
@@ -38,31 +41,35 @@ func (p PayloadAttributesV1) MarshalJSON() ([]byte, error) {
 }
 
 // UnmarshalJSON unmarshals from JSON.
-func (p *PayloadAttributesV1) UnmarshalJSON(input []byte) error {
-	type PayloadAttributesV1 struct {
-		Timestamp             *hexutil.Uint64 `json:"timestamp"     gencodec:"required"`
-		Random                *common.Hash    `json:"prevRandao"        gencodec:"required"`
-		SuggestedFeeRecipient *common.Address `json:"suggestedFeeRecipient"  gencodec:"required"`
-		Transactions          []hexutil.Bytes `json:"transactions,omitempty"  gencodec:"optional"`
-		NoTxPool              *bool           `json:"noTxPool,omitempty" gencodec:"optional"`
-		GasLimit              *hexutil.Uint64 `json:"gasLimit,omitempty" gencodec:"optional"`
+func (p *PayloadAttributes) UnmarshalJSON(input []byte) error {
+	type PayloadAttributes struct {
+		Timestamp             *hexutil.Uint64     `json:"timestamp"             gencodec:"required"`
+		Random                *common.Hash        `json:"prevRandao"            gencodec:"required"`
+		SuggestedFeeRecipient *common.Address     `json:"suggestedFeeRecipient" gencodec:"required"`
+		Withdrawals           []*types.Withdrawal `json:"withdrawals"`
+		Transactions          []hexutil.Bytes     `json:"transactions,omitempty"  gencodec:"optional"`
+		NoTxPool              *bool               `json:"noTxPool,omitempty" gencodec:"optional"`
+		GasLimit              *hexutil.Uint64     `json:"gasLimit,omitempty" gencodec:"optional"`
 	}
-	var dec PayloadAttributesV1
+	var dec PayloadAttributes
 	if err := json.Unmarshal(input, &dec); err != nil {
 		return err
 	}
 	if dec.Timestamp == nil {
-		return errors.New("missing required field 'timestamp' for PayloadAttributesV1")
+		return errors.New("missing required field 'timestamp' for PayloadAttributes")
 	}
 	p.Timestamp = uint64(*dec.Timestamp)
 	if dec.Random == nil {
-		return errors.New("missing required field 'prevRandao' for PayloadAttributesV1")
+		return errors.New("missing required field 'prevRandao' for PayloadAttributes")
 	}
 	p.Random = *dec.Random
 	if dec.SuggestedFeeRecipient == nil {
-		return errors.New("missing required field 'suggestedFeeRecipient' for PayloadAttributesV1")
+		return errors.New("missing required field 'suggestedFeeRecipient' for PayloadAttributes")
 	}
 	p.SuggestedFeeRecipient = *dec.SuggestedFeeRecipient
+	if dec.Withdrawals != nil {
+		p.Withdrawals = dec.Withdrawals
+	}
 	if dec.Transactions != nil {
 		p.Transactions = make([][]byte, len(dec.Transactions))
 		for k, v := range dec.Transactions {

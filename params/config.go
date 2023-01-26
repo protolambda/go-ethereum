@@ -33,6 +33,7 @@ var (
 	SepoliaGenesisHash = common.HexToHash("0x25a5cc106eea7138acab33231d7160d69cb777ee0c2c553fcddf5138993e6dd9")
 	RinkebyGenesisHash = common.HexToHash("0x6341fd3daf94b748c72ced5a5b26028f2474f5f00d824504e4fa37a75767e177")
 	GoerliGenesisHash  = common.HexToHash("0xbf7e331f7f7c1dd2e05159666b3bf8bc7a8a3a9eb1d518969eab529dd9b88c1a")
+	Eip4844GenesisHash = common.HexToHash("0x28389ca4b6b1a3e13068d70daf3dd23a6e4ded1056bb35014f0a2a2080c453a1")
 )
 
 // TrustedCheckpoints associates each known checkpoint with the genesis hash of
@@ -287,6 +288,7 @@ var (
 		GrayGlacierBlock:              big.NewInt(0),
 		MergeNetsplitBlock:            nil,
 		ShanghaiTime:                  nil,
+		ShardingForkTime:              nil,
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		TerminalTotalDifficulty:       nil,
@@ -317,6 +319,7 @@ var (
 		GrayGlacierBlock:              nil,
 		MergeNetsplitBlock:            nil,
 		ShanghaiTime:                  nil,
+		ShardingForkTime:              nil,
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		TerminalTotalDifficulty:       nil,
@@ -347,6 +350,7 @@ var (
 		GrayGlacierBlock:              big.NewInt(0),
 		MergeNetsplitBlock:            nil,
 		ShanghaiTime:                  nil,
+		ShardingForkTime:              nil,
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		TerminalTotalDifficulty:       nil,
@@ -377,6 +381,7 @@ var (
 		GrayGlacierBlock:              nil,
 		MergeNetsplitBlock:            nil,
 		ShanghaiTime:                  nil,
+		ShardingForkTime:              nil,
 		CancunTime:                    nil,
 		PragueTime:                    nil,
 		TerminalTotalDifficulty:       nil,
@@ -507,10 +512,10 @@ type ChainConfig struct {
 	MergeNetsplitBlock  *big.Int `json:"mergeNetsplitBlock,omitempty"`  // Virtual fork after The Merge to use as a network splitter
 
 	// Fork scheduling was switched from blocks to timestamps here
-
-	ShanghaiTime *big.Int `json:"shanghaiTime,omitempty"` // Shanghai switch time (nil = no fork, 0 = already on shanghai)
-	CancunTime   *big.Int `json:"cancunTime,omitempty"`   // Cancun switch time (nil = no fork, 0 = already on cancun)
-	PragueTime   *big.Int `json:"pragueTime,omitempty"`   // Prague switch time (nil = no fork, 0 = already on prague)
+	ShanghaiTime     *big.Int `json:"shanghaiTime,omitempty"`     // Shanghai switch time (nil = no fork, 0 = already on shanghai)
+	ShardingForkTime *big.Int `json:"shardingForkTime,omitempty"` // Mini-Danksharding switch block (nil = no fork, 0 = already activated)
+	CancunTime       *big.Int `json:"cancunTime,omitempty"`       // Cancun switch time (nil = no fork, 0 = already on cancun)
+	PragueTime       *big.Int `json:"pragueTime,omitempty"`       // Prague switch time (nil = no fork, 0 = already on prague)
 
 	BedrockBlock *big.Int `json:"bedrockBlock,omitempty"` // Bedrock switch block (nil = no fork, 0 = already on optimism bedrock)
 
@@ -643,6 +648,9 @@ func (c *ChainConfig) Description() string {
 	if c.ShanghaiTime != nil {
 		banner += fmt.Sprintf(" - Shanghai:                    @%-10v (https://github.com/ethereum/execution-specs/blob/master/network-upgrades/mainnet-upgrades/shanghai.md)\n", c.ShanghaiTime)
 	}
+	if c.ShardingForkTime != nil {
+		banner += fmt.Sprintf(" - ShardingFork:                @%-10v\n", c.ShardingForkTime)
+	}
 	if c.CancunTime != nil {
 		banner += fmt.Sprintf(" - Cancun:                      @%-10v\n", c.CancunTime)
 	}
@@ -737,6 +745,11 @@ func (c *ChainConfig) IsShanghai(time *big.Int) bool {
 	return isTimestampForked(c.ShanghaiTime, time)
 }
 
+// IsSharding returns whether time is either equal to the Mini-Danksharding fork time or greater.
+func (c *ChainConfig) IsSharding(time *big.Int) bool {
+	return isTimestampForked(c.ShardingForkTime, time)
+}
+
 // IsCancun returns whether num is either equal to the Cancun fork time or greater.
 func (c *ChainConfig) IsCancun(time *big.Int) bool {
 	return isTimestampForked(c.CancunTime, time)
@@ -819,6 +832,7 @@ func (c *ChainConfig) CheckConfigForkOrder() error {
 		{name: "grayGlacierBlock", block: c.GrayGlacierBlock, optional: true},
 		{name: "mergeNetsplitBlock", block: c.MergeNetsplitBlock, optional: true},
 		{name: "shanghaiTime", timestamp: c.ShanghaiTime},
+		{name: "shardingForkTime", timestamp: c.ShardingForkTime},
 		{name: "cancunTime", timestamp: c.CancunTime, optional: true},
 		{name: "pragueTime", timestamp: c.PragueTime, optional: true},
 	} {
@@ -917,6 +931,9 @@ func (c *ChainConfig) checkCompatible(newcfg *ChainConfig, headNumber *big.Int, 
 	}
 	if isForkTimestampIncompatible(c.ShanghaiTime, newcfg.ShanghaiTime, headTimestamp) {
 		return newTimestampCompatError("Shanghai fork timestamp", c.ShanghaiTime, newcfg.ShanghaiTime)
+	}
+	if isForkTimestampIncompatible(c.ShardingForkTime, newcfg.ShardingForkTime, headTimestamp) {
+		return newTimestampCompatError("Sharding fork timestamp", c.ShardingForkTime, newcfg.ShardingForkTime)
 	}
 	if isForkTimestampIncompatible(c.CancunTime, newcfg.CancunTime, headTimestamp) {
 		return newTimestampCompatError("Cancun fork timestamp", c.CancunTime, newcfg.CancunTime)
@@ -1075,6 +1092,7 @@ type Rules struct {
 	IsByzantium, IsConstantinople, IsPetersburg, IsIstanbul bool
 	IsBerlin, IsLondon                                      bool
 	IsMerge, IsShanghai, isCancun, isPrague                 bool
+	IsSharding                                              bool
 	IsOptimismBedrock                                       bool
 }
 
@@ -1098,6 +1116,7 @@ func (c *ChainConfig) Rules(num *big.Int, isMerge bool, timestamp *big.Int) Rule
 		IsLondon:          c.IsLondon(num),
 		IsMerge:           isMerge,
 		IsShanghai:        c.IsShanghai(timestamp),
+		IsSharding:        c.IsSharding(timestamp),
 		isCancun:          c.IsCancun(timestamp),
 		isPrague:          c.IsPrague(timestamp),
 		IsOptimismBedrock: c.IsOptimismBedrock(num),

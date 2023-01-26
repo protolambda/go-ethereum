@@ -19,7 +19,10 @@ package types
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/big"
+
+	"github.com/protolambda/ztyp/view"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
@@ -51,6 +54,13 @@ type txJSON struct {
 	// Access list transaction fields:
 	ChainID    *hexutil.Big `json:"chainId,omitempty"`
 	AccessList *AccessList  `json:"accessList,omitempty"`
+
+	// Blob transaction fields:
+	MaxFeePerDataGas    *hexutil.Big  `json:"maxFeePerDataGas,omitempty"`
+	BlobVersionedHashes []common.Hash `json:"blobVersionedHashes,omitempty"`
+	Blobs               Blobs         `json:"blobs,omitempty"`
+	BlobKzgs            BlobKzgs      `json:"blobKzgs,omitempty"`
+	KzgAggregatedProof  KZGProof      `json:"kzgAggregatedProof,omitempty"`
 
 	// Only used for encoding:
 	Hash common.Hash `json:"hash"`
@@ -112,6 +122,27 @@ func (tx *Transaction) MarshalJSON() ([]byte, error) {
 		}
 		enc.IsSystemTx = &itx.IsSystemTransaction
 		// other fields will show up as null.
+	case *SignedBlobTx:
+		enc.ChainID = (*hexutil.Big)(u256ToBig(&itx.Message.ChainID))
+		enc.AccessList = (*AccessList)(&itx.Message.AccessList)
+		enc.Nonce = (*hexutil.Uint64)(&itx.Message.Nonce)
+		enc.Gas = (*hexutil.Uint64)(&itx.Message.Gas)
+		enc.MaxFeePerGas = (*hexutil.Big)(u256ToBig(&itx.Message.GasFeeCap))
+		enc.MaxPriorityFeePerGas = (*hexutil.Big)(u256ToBig(&itx.Message.GasTipCap))
+		enc.Value = (*hexutil.Big)(u256ToBig(&itx.Message.Value))
+		enc.Data = (*hexutil.Bytes)(&itx.Message.Data)
+		enc.To = tx.To()
+		v, r, s := tx.RawSignatureValues()
+		enc.V = (*hexutil.Big)(v)
+		enc.R = (*hexutil.Big)(r)
+		enc.S = (*hexutil.Big)(s)
+		enc.MaxFeePerDataGas = (*hexutil.Big)(u256ToBig(&itx.Message.MaxFeePerDataGas))
+		enc.BlobVersionedHashes = itx.Message.BlobVersionedHashes
+		if tx.wrapData != nil {
+			enc.Blobs = tx.wrapData.blobs()
+			enc.BlobKzgs = tx.wrapData.kzgs()
+			enc.KzgAggregatedProof = tx.wrapData.aggregatedProof()
+		}
 	}
 	return json.Marshal(&enc)
 }
@@ -312,6 +343,79 @@ func (tx *Transaction) UnmarshalJSON(input []byte) error {
 		// IsSystemTx may be omitted. Defaults to false.
 		if dec.IsSystemTx != nil {
 			itx.IsSystemTransaction = *dec.IsSystemTx
+		}
+	case BlobTxType:
+		var itx SignedBlobTx
+		inner = &itx
+		// Access list is optional for now.
+		if dec.AccessList != nil {
+			itx.Message.AccessList = AccessListView(*dec.AccessList)
+		}
+		if dec.ChainID == nil {
+			return errors.New("missing required field 'chainId' in transaction")
+		}
+		itx.Message.ChainID.SetFromBig((*big.Int)(dec.ChainID))
+		if dec.To != nil {
+			itx.Message.To.Address = (*AddressSSZ)(dec.To)
+		}
+		if dec.Nonce == nil {
+			return errors.New("missing required field 'nonce' in transaction")
+		}
+		itx.Message.Nonce = view.Uint64View(*dec.Nonce)
+		if dec.MaxPriorityFeePerGas == nil {
+			return errors.New("missing required field 'maxPriorityFeePerGas' for txdata")
+		}
+		itx.Message.GasTipCap.SetFromBig((*big.Int)(dec.MaxPriorityFeePerGas))
+		if dec.MaxFeePerGas == nil {
+			return errors.New("missing required field 'maxFeePerGas' for txdata")
+		}
+		itx.Message.GasFeeCap.SetFromBig((*big.Int)(dec.MaxFeePerGas))
+		if dec.Gas == nil {
+			return errors.New("missing required field 'gas' for txdata")
+		}
+		itx.Message.Gas = view.Uint64View(*dec.Gas)
+		if dec.Value == nil {
+			return errors.New("missing required field 'value' in transaction")
+		}
+		itx.Message.Value.SetFromBig((*big.Int)(dec.Value))
+		if dec.Data == nil {
+			return errors.New("missing required field 'input' in transaction")
+		}
+		itx.Message.Data = TxDataView(*dec.Data)
+		if dec.V == nil {
+			return errors.New("missing required field 'v' in transaction")
+		}
+		itx.Signature.V = view.Uint8View((*big.Int)(dec.V).Uint64())
+		if dec.R == nil {
+			return errors.New("missing required field 'r' in transaction")
+		}
+		itx.Signature.R.SetFromBig((*big.Int)(dec.R))
+		if dec.S == nil {
+			return errors.New("missing required field 's' in transaction")
+		}
+		itx.Signature.S.SetFromBig((*big.Int)(dec.S))
+		withSignature := (*big.Int)(dec.V).Sign() != 0 || (*big.Int)(dec.R).Sign() != 0 || (*big.Int)(dec.S).Sign() != 0
+		if withSignature {
+			if err := sanityCheckSignature(big.NewInt(int64(itx.Signature.V)), u256ToBig(&itx.Signature.R), u256ToBig(&itx.Signature.S), false); err != nil {
+				return err
+			}
+		}
+		itx.Message.MaxFeePerDataGas.SetFromBig((*big.Int)(dec.MaxFeePerDataGas))
+		if dec.MaxFeePerDataGas == nil {
+			return errors.New("missing required field 'maxFeePerDataGas' for txdata")
+		}
+		itx.Message.BlobVersionedHashes = dec.BlobVersionedHashes
+		// A BlobTx may not contain data
+		if len(dec.Blobs) != 0 || len(dec.BlobKzgs) != 0 {
+			tx.wrapData = &BlobTxWrapData{
+				BlobKzgs:           dec.BlobKzgs,
+				Blobs:              dec.Blobs,
+				KzgAggregatedProof: dec.KzgAggregatedProof,
+			}
+			// Verify that versioned hashes match kzgs, and kzgs match blobs.
+			if err := tx.wrapData.validateBlobTransactionWrapper(&itx); err != nil {
+				return fmt.Errorf("blob wrapping data is invalid: %v", err)
+			}
 		}
 	default:
 		return ErrTxTypeNotSupported

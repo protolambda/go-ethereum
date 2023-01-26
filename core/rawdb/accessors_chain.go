@@ -636,7 +636,12 @@ func ReadReceipts(db ethdb.Reader, hash common.Hash, number uint64, config *para
 		log.Error("Missing body but have receipt", "hash", hash, "number", number)
 		return nil
 	}
-	if err := receipts.DeriveFields(config, hash, number, body.Transactions); err != nil {
+	header := ReadHeader(db, hash, number) // fetch the header to get the block time
+	if header == nil {
+		log.Error("Failed to retrieve block header", "hash", hash, "number", number)
+		return nil
+	}
+	if err := receipts.DeriveFields(config, hash, number, header.Time, body.Transactions); err != nil {
 		log.Error("Failed to derive block receipts fields", "hash", hash, "number", number, "err", err)
 		return nil
 	}
@@ -760,7 +765,7 @@ func ReadBlock(db ethdb.Reader, hash common.Hash, number uint64) *types.Block {
 	if body == nil {
 		return nil
 	}
-	return types.NewBlockWithHeader(header).WithBody(body.Transactions, body.Uncles)
+	return types.NewBlockWithHeader(header).WithBody2(body.Transactions, body.Uncles, body.Withdrawals)
 }
 
 // WriteBlock serializes a block into the database, header and body separately.
@@ -860,7 +865,7 @@ func ReadBadBlock(db ethdb.Reader, hash common.Hash) *types.Block {
 	}
 	for _, bad := range badBlocks {
 		if bad.Header.Hash() == hash {
-			return types.NewBlockWithHeader(bad.Header).WithBody(bad.Body.Transactions, bad.Body.Uncles)
+			return types.NewBlockWithHeader(bad.Header).WithBody2(bad.Body.Transactions, bad.Body.Uncles, bad.Body.Withdrawals)
 		}
 	}
 	return nil
@@ -879,7 +884,7 @@ func ReadAllBadBlocks(db ethdb.Reader) []*types.Block {
 	}
 	var blocks []*types.Block
 	for _, bad := range badBlocks {
-		blocks = append(blocks, types.NewBlockWithHeader(bad.Header).WithBody(bad.Body.Transactions, bad.Body.Uncles))
+		blocks = append(blocks, types.NewBlockWithHeader(bad.Header).WithBody2(bad.Body.Transactions, bad.Body.Uncles, bad.Body.Withdrawals))
 	}
 	return blocks
 }

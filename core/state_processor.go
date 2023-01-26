@@ -56,44 +56,50 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 // Process returns the receipts and logs accumulated during the process and
 // returns the amount of gas that was used in the process. If any of the
 // transactions failed to execute due to insufficient gas it will return an error.
-func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
+func (p *StateProcessor) Process(block *types.Block, excessDataGas *big.Int, statedb *state.StateDB, cfg vm.Config) (types.Receipts, []*types.Log, uint64, error) {
 	var (
 		receipts    types.Receipts
 		usedGas     = new(uint64)
 		header      = block.Header()
 		blockHash   = block.Hash()
 		blockNumber = block.Number()
+		blockTime   = block.Time()
 		allLogs     []*types.Log
-		gp          = new(GasPool).AddGas(block.GasLimit())
+		gp          = new(GasPool).AddGas(block.GasLimit()).AddDataGas(params.MaxDataGasPerBlock)
 	)
 	// Mutate the block and state according to any hard-fork specs
 	if p.config.DAOForkSupport && p.config.DAOForkBlock != nil && p.config.DAOForkBlock.Cmp(block.Number()) == 0 {
 		misc.ApplyDAOHardFork(statedb)
 	}
-	blockContext := NewEVMBlockContext(header, p.bc, nil)
+	blockContext := NewEVMBlockContext(header, excessDataGas, p.bc, nil)
 	blockContext.L1CostFunc = types.NewL1CostFunc(p.config, statedb)
 	vmenv := vm.NewEVM(blockContext, vm.TxContext{}, statedb, p.config, cfg)
 	// Iterate over and process the individual transactions
+	signer := types.MakeSigner(p.config, header.Number, header.Time)
 	for i, tx := range block.Transactions() {
-		msg, err := tx.AsMessage(types.MakeSigner(p.config, header.Number), header.BaseFee)
+		msg, err := tx.AsMessage(signer, header.BaseFee)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 		statedb.SetTxContext(tx.Hash(), i)
-		receipt, err := applyTransaction(msg, p.config, gp, statedb, blockNumber, blockHash, tx, usedGas, vmenv)
+		receipt, err := applyTransaction(msg, p.config, gp, statedb, blockNumber, blockTime, blockHash, tx, usedGas, vmenv)
 		if err != nil {
 			return nil, nil, 0, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
 		}
 		receipts = append(receipts, receipt)
 		allLogs = append(allLogs, receipt.Logs...)
 	}
+	// Fail if Shanghai not enabled and len(withdrawals) is non-zero.
+	if !p.config.IsShanghai(header.TimeBig()) && len(block.Withdrawals()) != 0 {
+		return nil, nil, 0, fmt.Errorf("non-nil withdrawal before shanghai")
+	}
 	// Finalize the block, applying any consensus engine specific extras (e.g. block rewards)
-	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles())
+	p.engine.Finalize(p.bc, header, statedb, block.Transactions(), block.Uncles(), block.Withdrawals())
 
 	return receipts, allLogs, *usedGas, nil
 }
 
-func applyTransaction(msg types.Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM) (*types.Receipt, error) {
+func applyTransaction(msg types.Message, config *params.ChainConfig, gp *GasPool, statedb *state.StateDB, blockNumber *big.Int, blockTime uint64, blockHash common.Hash, tx *types.Transaction, usedGas *uint64, evm *vm.EVM) (*types.Receipt, error) {
 	// Create a new context to be used in the EVM environment.
 	txContext := NewEVMTxContext(msg)
 	evm.Reset(txContext, statedb)
@@ -142,14 +148,15 @@ func applyTransaction(msg types.Message, config *params.ChainConfig, gp *GasPool
 // and uses the input parameters for its environment. It returns the receipt
 // for the transaction, gas used and an error if the transaction failed,
 // indicating the block was invalid.
-func ApplyTransaction(config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, error) {
-	msg, err := tx.AsMessage(types.MakeSigner(config, header.Number), header.BaseFee)
+func ApplyTransaction(config *params.ChainConfig, bc ChainContext, author *common.Address, gp *GasPool, statedb *state.StateDB, header *types.Header, excessDataGas *big.Int, tx *types.Transaction, usedGas *uint64, cfg vm.Config) (*types.Receipt, error) {
+	signer := types.MakeSigner(config, header.Number, header.Time)
+	msg, err := tx.AsMessage(signer, header.BaseFee)
 	if err != nil {
 		return nil, err
 	}
 	// Create a new context to be used in the EVM environment
-	blockContext := NewEVMBlockContext(header, bc, author)
+	blockContext := NewEVMBlockContext(header, excessDataGas, bc, author)
 	blockContext.L1CostFunc = types.NewL1CostFunc(config, statedb)
 	vmenv := vm.NewEVM(blockContext, vm.TxContext{}, statedb, config, cfg)
-	return applyTransaction(msg, config, gp, statedb, header.Number, header.Hash(), tx, usedGas, vmenv)
+	return applyTransaction(msg, config, gp, statedb, header.Number, header.Time, header.Hash(), tx, usedGas, vmenv)
 }

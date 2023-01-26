@@ -45,6 +45,8 @@ type (
 func (evm *EVM) precompile(addr common.Address) (PrecompiledContract, bool) {
 	var precompiles map[common.Address]PrecompiledContract
 	switch {
+	case evm.chainRules.IsSharding:
+		precompiles = PrecompiledContractsDanksharding
 	case evm.chainRules.IsBerlin:
 		precompiles = PrecompiledContractsBerlin
 	case evm.chainRules.IsIstanbul:
@@ -72,21 +74,23 @@ type BlockContext struct {
 	L1CostFunc types.L1CostFunc
 
 	// Block information
-	Coinbase    common.Address // Provides information for COINBASE
-	GasLimit    uint64         // Provides information for GASLIMIT
-	BlockNumber *big.Int       // Provides information for NUMBER
-	Time        *big.Int       // Provides information for TIME
-	Difficulty  *big.Int       // Provides information for DIFFICULTY
-	BaseFee     *big.Int       // Provides information for BASEFEE
-	Random      *common.Hash   // Provides information for PREVRANDAO
+	Coinbase      common.Address // Provides information for COINBASE
+	GasLimit      uint64         // Provides information for GASLIMIT
+	BlockNumber   *big.Int       // Provides information for NUMBER
+	Time          *big.Int       // Provides information for TIME
+	Difficulty    *big.Int       // Provides information for DIFFICULTY
+	BaseFee       *big.Int       // Provides information for BASEFEE
+	ExcessDataGas *big.Int       // Provides information for EIP-4844 fee calculation
+	Random        *common.Hash   // Provides information for RANDOM
 }
 
 // TxContext provides the EVM with information about a transaction.
 // All fields can change between transactions.
 type TxContext struct {
 	// Message information
-	Origin   common.Address // Provides information for ORIGIN
-	GasPrice *big.Int       // Provides information for GASPRICE
+	Origin     common.Address // Provides information for ORIGIN
+	GasPrice   *big.Int       // Provides information for GASPRICE
+	DataHashes []common.Hash  // Provides versioned data hashes for DATAHASH
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides
