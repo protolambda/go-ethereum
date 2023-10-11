@@ -19,6 +19,7 @@ package core
 import (
 	"fmt"
 	"math/big"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
@@ -27,7 +28,25 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/metrics"
 	"github.com/ethereum/go-ethereum/params"
+)
+
+var (
+	statEvmOpcodeExecutionAvgTime = func() (out [256]metrics.Timer) {
+		for i := 0; i < 256; i++ {
+			out[i] = metrics.NewRegisteredTimer(fmt.Sprintf("evm/tracer/opcode/%d/execution/avgTime", i), nil)
+		}
+		return
+	}()
+	statEvmOpcodeExecutionCount = func() (out [256]metrics.Counter) {
+		for i := 0; i < 256; i++ {
+			out[i] = metrics.NewRegisteredCounter(fmt.Sprintf("evm/tracer/opcode/%d/execution/count", i), nil)
+		}
+		return
+	}()
+	statTxGas     = metrics.NewRegisteredCounter("evm/tracer/tx/gasused", nil)
+	statCallCount = metrics.NewRegisteredCounter("evm/tracer/call/count", nil)
 )
 
 // StateProcessor is a basic Processor, which takes care of transitioning
@@ -47,6 +66,71 @@ func NewStateProcessor(config *params.ChainConfig, bc *BlockChain, engine consen
 		bc:     bc,
 		engine: engine,
 	}
+}
+
+type MeteredTracer struct {
+	lastTime  time.Time
+	lastOp    vm.OpCode
+	totalTime [256]time.Duration
+	totalOps  [256]uint64
+	gasLimit  uint64
+	running   bool
+}
+
+func (m *MeteredTracer) CaptureTxStart(gasLimit uint64) {
+	m.gasLimit = gasLimit
+}
+
+func (m *MeteredTracer) CaptureTxEnd(restGas uint64) {
+	statTxGas.Inc(int64(m.gasLimit - restGas))
+}
+
+func (m *MeteredTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
+	*m = MeteredTracer{} // completely reset all values
+}
+
+func (m *MeteredTracer) postOp() {
+	now := time.Now()
+	if m.running {
+		delta := now.Sub(m.lastTime)
+		if delta < 0 {
+			delta = 1 // clip to 1 ns
+		}
+		m.totalTime[m.lastOp] += delta
+		m.totalOps[m.lastOp] += 1
+	}
+	m.lastTime = now
+}
+
+func (m *MeteredTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {
+	m.postOp()
+
+	// register aggregate metrics
+	for i := 0; i < 256; i++ {
+		avgTime := time.Duration(0)
+		if m.totalOps[i] > 0 {
+			avgTime = m.totalTime[i] / time.Duration(m.totalOps[i])
+		}
+		statEvmOpcodeExecutionAvgTime[i].Update(avgTime)
+		statEvmOpcodeExecutionCount[i].Inc(int64(m.totalOps[i]))
+	}
+}
+
+func (m *MeteredTracer) CaptureEnter(typ vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+	statCallCount.Inc(1)
+}
+
+func (m *MeteredTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
+}
+
+// happens before op execution
+func (m *MeteredTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) {
+	m.postOp()
+	m.lastOp = op // register next op
+	m.running = true
+}
+
+func (m *MeteredTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, depth int, err error) {
 }
 
 // Process processes the state changes according to the Ethereum rules by running
@@ -75,6 +159,9 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 		vmenv   = vm.NewEVM(context, vm.TxContext{}, statedb, p.config, cfg)
 		signer  = types.MakeSigner(p.config, header.Number, header.Time)
 	)
+	if metrics.EnabledExpensive {
+		vmenv.Config.Tracer = &MeteredTracer{}
+	}
 	// Iterate over and process the individual transactions
 	for i, tx := range block.Transactions() {
 		msg, err := TransactionToMessage(tx, signer, header.BaseFee)
